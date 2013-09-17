@@ -81,7 +81,7 @@ filebucket { 'main':
 }
 File { backup => 'main' }
 
-include 'nodes/*.pp'
+import 'nodes/*.pp'
 EOF
 mkdir -p /etc/puppet/manifests/nodes
 
