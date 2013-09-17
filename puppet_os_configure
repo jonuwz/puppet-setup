@@ -1,0 +1,484 @@
+rpm -ivh https://yum.puppetlabs.com/el/6/products/x86_64/puppetlabs-release-6-7.noarch.rpm
+yum -y install gcc gcc-c++ curl-devel openssl-devel zlib-devel ruby-devel httpd-devel apr-devel apr-util-devel httpd mysql-server puppet-dashboard mod_ssl make puppet-server
+gem install passenger rack --no-ri --no-rdoc
+passenger-install-apache2-module -a
+
+chkconfig mysqld on
+chkconfig httpd on
+
+chcon -t bin_t /usr/sbin/httpd
+/etc/init.d/httpd start
+
+grep max_allowed_packet /etc/my.cnf || sed -i '2 i \max_allowed_packet= 32M' /etc/my.cnf
+/etc/init.d/mysqld start
+mysql -u root -e "CREATE DATABASE dashboard_production CHARACTER SET utf8;"
+mysql -u root -e "CREATE DATABASE dashboard_test CHARACTER SET utf8;"
+mysql -u root -e "CREATE DATABASE dashboard_development CHARACTER SET utf8;"
+mysql -u root -e "CREATE USER 'dashboard'@'localhost' IDENTIFIED BY 'dashboard';"
+mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_production.* TO 'dashboard'@'localhost';"
+mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_test.* TO 'dashboard'@'localhost';"
+mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_development.* TO 'dashboard'@'localhost';"
+
+cat <<EOF > /usr/share/puppet-dashboard/config/database.yml
+production:
+  database: dashboard_production
+  username: dashboard
+  password: dashboard
+  encoding: utf8
+  adapter: mysql
+
+development:
+  database: dashboard_development
+  username: dashboard
+  password: dashboard
+  encoding: utf8
+  adapter: mysql
+
+test:
+  database: dashboard_test
+  username: dashboard
+  password: dashboard
+  encoding: utf8
+  adapter: mysql
+EOF
+
+cd /usr/share/puppet-dashboard
+rake gems:refresh_specs
+rake RAILS_ENV=production db:migrate
+rake RAILS_ENV=test db:migrate db:test:prepare
+rake RAILS_ENV=development db:migrate db:test:prepare
+
+fqdn=$(facter fqdn)
+cat <<EOF > /etc/puppet/puppet.conf
+[main]
+    logdir = /var/log/puppet
+    rundir = /var/run/puppet
+    ssldir = \$vardir/ssl
+    server = $fqdn
+    certname = $fqdn
+
+[master]
+    reports = log,http
+    reporturl = https://$fqdn:443/reports/upload
+    ssl_client_header = SSL_CLIENT_S_DN
+    ssl_client_verify_header = SSL_CLIENT_VERIFY
+
+[agent]
+    report = true
+    classfile = \$vardir/classes.txt
+    localconfig = \$vardir/localconfig
+    pluginsync = true
+    environment = production
+EOF
+
+cat <<'EOF' > /etc/puppet/auth.conf
+path ~ ^/catalog/([^/]+)$
+method find
+allow $1
+
+path ~ ^/node/([^/]+)$
+method find
+allow $1
+
+path /certificate_revocation_list/ca
+method find
+allow *
+
+path ~ ^/report/([^/]+)$
+method save
+allow $1
+
+path /file
+allow *
+
+path /certificate/ca
+auth any
+method find
+allow *
+
+path /certificate/
+auth any
+method find
+allow *
+
+path /certificate_request
+auth any
+method find, save
+allow *
+
+path /facts
+auth yes
+method find, search
+allow dashboard
+
+path /
+auth any
+EOF
+
+cat <<EOF > /usr/share/puppet-dashboard/config/settings.yml
+cn_name: 'dashboard'
+
+ca_crl_path: 'certs/dashboard.ca_crl.pem'
+ca_certificate_path: 'certs/dashboard.ca_cert.pem'
+certificate_path: 'certs/dashboard.cert.pem'
+private_key_path: 'certs/dashboard.private_key.pem'
+public_key_path: 'certs/dashboard.public_key.pem'
+
+ca_server: '$fqdn'
+ca_port: 8140
+key_length: 1024
+
+enable_inventory_service: true
+inventory_server: '$fqdn'
+inventory_port: 8140
+
+use_file_bucket_diffs: true
+file_bucket_server: '$fqdn'
+file_bucket_port: 8140
+
+no_longer_reporting_cutoff: 3600
+daily_run_history_length: 30
+use_external_node_classification: true
+
+datetime_format: '%Y-%m-%d %H:%M %Z'
+date_format: '%A, %B %e, %Y'
+
+custom_logo_url: '/images/dashboard_logo.png'
+custom_logo_width: 155px
+custom_logo_height: 23px
+custom_logo_alt_text: 'Puppet Dashboard'
+
+disable_legacy_report_upload_url: false
+enable_read_only_mode: false
+
+nodes_per_page: 20
+classes_per_page: 50
+groups_per_page: 50
+reports_per_page: 20
+EOF
+
+rm -f /etc/httpd/conf.d/*
+mod_passenger="$(passenger-install-apache2-module --snippet | grep LoadModule)"
+path_passenger="$(passenger-install-apache2-module --snippet | grep -v LoadModule)"
+cat - <<EOF > /etc/httpd/conf/httpd.conf
+ServerTokens Prod
+ServerRoot "/etc/httpd"
+PidFile run/httpd.pid
+Timeout 60
+KeepAlive Off
+MaxKeepAliveRequests 100
+KeepAliveTimeout 15
+
+<IfModule prefork.c>
+StartServers       8
+MinSpareServers    5
+MaxSpareServers   20
+ServerLimit      256
+MaxClients       256
+MaxRequestsPerChild  4000
+</IfModule>
+
+<IfModule worker.c>
+StartServers         4
+MaxClients         300
+MinSpareThreads     25
+MaxSpareThreads     75 
+ThreadsPerChild     25
+MaxRequestsPerChild  0
+</IfModule>
+
+$mod_passenger
+LoadModule ssl_module modules/mod_ssl.so
+LoadModule auth_basic_module modules/mod_auth_basic.so
+LoadModule auth_digest_module modules/mod_auth_digest.so
+LoadModule authn_file_module modules/mod_authn_file.so
+LoadModule authn_alias_module modules/mod_authn_alias.so
+LoadModule authn_anon_module modules/mod_authn_anon.so
+LoadModule authn_dbm_module modules/mod_authn_dbm.so
+LoadModule authn_default_module modules/mod_authn_default.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule authz_user_module modules/mod_authz_user.so
+LoadModule authz_owner_module modules/mod_authz_owner.so
+LoadModule authz_groupfile_module modules/mod_authz_groupfile.so
+LoadModule authz_dbm_module modules/mod_authz_dbm.so
+LoadModule authz_default_module modules/mod_authz_default.so
+LoadModule ldap_module modules/mod_ldap.so
+LoadModule authnz_ldap_module modules/mod_authnz_ldap.so
+LoadModule include_module modules/mod_include.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule logio_module modules/mod_logio.so
+LoadModule env_module modules/mod_env.so
+LoadModule ext_filter_module modules/mod_ext_filter.so
+LoadModule mime_magic_module modules/mod_mime_magic.so
+LoadModule expires_module modules/mod_expires.so
+LoadModule deflate_module modules/mod_deflate.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule usertrack_module modules/mod_usertrack.so
+LoadModule setenvif_module modules/mod_setenvif.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule dav_module modules/mod_dav.so
+LoadModule status_module modules/mod_status.so
+LoadModule autoindex_module modules/mod_autoindex.so
+LoadModule info_module modules/mod_info.so
+LoadModule dav_fs_module modules/mod_dav_fs.so
+LoadModule vhost_alias_module modules/mod_vhost_alias.so
+LoadModule negotiation_module modules/mod_negotiation.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule actions_module modules/mod_actions.so
+LoadModule speling_module modules/mod_speling.so
+LoadModule userdir_module modules/mod_userdir.so
+LoadModule alias_module modules/mod_alias.so
+LoadModule substitute_module modules/mod_substitute.so
+LoadModule rewrite_module modules/mod_rewrite.so
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_balancer_module modules/mod_proxy_balancer.so
+LoadModule proxy_ftp_module modules/mod_proxy_ftp.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+LoadModule proxy_ajp_module modules/mod_proxy_ajp.so
+LoadModule proxy_connect_module modules/mod_proxy_connect.so
+LoadModule cache_module modules/mod_cache.so
+LoadModule suexec_module modules/mod_suexec.so
+LoadModule disk_cache_module modules/mod_disk_cache.so
+LoadModule cgi_module modules/mod_cgi.so
+LoadModule version_module modules/mod_version.so
+
+Include conf.d/*.conf
+User apache
+Group apache
+ServerAdmin root@$fqdn
+ServerName  $fqdn
+UseCanonicalName Off
+
+TypesConfig /etc/mime.types
+DefaultType text/plain
+<IfModule mod_mime_magic.c>
+    MIMEMagicFile conf/magic
+</IfModule>
+
+HostnameLookups Off
+ErrorLog logs/error_log
+LogLevel warn
+LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+LogFormat "%h %l %u %t \"%r\" %>s %b" common
+LogFormat "%{Referer}i -> %U" referer
+LogFormat "%{User-agent}i" agent
+CustomLog logs/access_log combined
+ServerSignature On
+
+IndexOptions FancyIndexing VersionSort NameWidth=* HTMLTable Charset=UTF-8
+AddIconByEncoding (CMP,/icons/compressed.gif) x-compress x-gzip
+AddIconByType (TXT,/icons/text.gif) text/*
+AddIconByType (IMG,/icons/image2.gif) image/*
+AddIconByType (SND,/icons/sound2.gif) audio/*
+AddIconByType (VID,/icons/movie.gif) video/*
+AddIcon /icons/binary.gif .bin .exe
+AddIcon /icons/binhex.gif .hqx
+AddIcon /icons/tar.gif .tar
+AddIcon /icons/world2.gif .wrl .wrl.gz .vrml .vrm .iv
+AddIcon /icons/compressed.gif .Z .z .tgz .gz .zip
+AddIcon /icons/a.gif .ps .ai .eps
+AddIcon /icons/layout.gif .html .shtml .htm .pdf
+AddIcon /icons/text.gif .txt
+AddIcon /icons/c.gif .c
+AddIcon /icons/p.gif .pl .py
+AddIcon /icons/f.gif .for
+AddIcon /icons/dvi.gif .dvi
+AddIcon /icons/uuencoded.gif .uu
+AddIcon /icons/script.gif .conf .sh .shar .csh .ksh .tcl
+AddIcon /icons/tex.gif .tex
+AddIcon /icons/bomb.gif core
+AddIcon /icons/back.gif ..
+AddIcon /icons/hand.right.gif README
+AddIcon /icons/folder.gif ^^DIRECTORY^^
+AddIcon /icons/blank.gif ^^BLANKICON^^
+DefaultIcon /icons/unknown.gif
+ReadmeName README.html
+HeaderName HEADER.html
+IndexIgnore .??* *~ *# HEADER* README* RCS CVS *,v *,t
+AddLanguage ca .ca
+AddLanguage cs .cz .cs
+AddLanguage da .dk
+AddLanguage de .de
+AddLanguage el .el
+AddLanguage en .en
+AddLanguage eo .eo
+AddLanguage es .es
+AddLanguage et .et
+AddLanguage fr .fr
+AddLanguage he .he
+AddLanguage hr .hr
+AddLanguage it .it
+AddLanguage ja .ja
+AddLanguage ko .ko
+AddLanguage ltz .ltz
+AddLanguage nl .nl
+AddLanguage nn .nn
+AddLanguage no .no
+AddLanguage pl .po
+AddLanguage pt .pt
+AddLanguage pt-BR .pt-br
+AddLanguage ru .ru
+AddLanguage sv .sv
+AddLanguage zh-CN .zh-cn
+AddLanguage zh-TW .zh-tw
+LanguagePriority en ca cs da de el eo es et fr he hr it ja ko ltz nl nn no pl pt pt-BR ru sv zh-CN zh-TW
+ForceLanguagePriority Prefer Fallback
+AddDefaultCharset UTF-8
+AddType application/x-compress .Z
+AddType application/x-gzip .gz .tgz
+AddType application/x-x509-ca-cert .crt
+AddType application/x-pkcs7-crl    .crl
+AddHandler type-map var
+AddType text/html .shtml
+AddOutputFilter INCLUDES .shtml
+
+Alias /error/ "/var/www/error/"
+
+<IfModule mod_negotiation.c>
+  <IfModule mod_include.c>
+    <Directory "/var/www/error">
+        AllowOverride None
+        Options IncludesNoExec
+        AddOutputFilter Includes html
+        AddHandler type-map var
+        Order allow,deny
+        Allow from all
+        LanguagePriority en es de fr
+        ForceLanguagePriority Prefer Fallback
+    </Directory>
+  </IfModule>
+</IfModule>
+
+BrowserMatch "Mozilla/2" nokeepalive
+BrowserMatch "MSIE 4\.0b2;" nokeepalive downgrade-1.0 force-response-1.0
+BrowserMatch "RealPlayer 4\.0" force-response-1.0
+BrowserMatch "Java/1\.0" force-response-1.0
+BrowserMatch "JDK/1\.0" force-response-1.0
+BrowserMatch "Microsoft Data Access Internet Publishing Provider" redirect-carefully
+BrowserMatch "MS FrontPage" redirect-carefully
+BrowserMatch "^WebDrive" redirect-carefully
+BrowserMatch "^WebDAVFS/1.[0123]" redirect-carefully
+BrowserMatch "^gnome-vfs/1.0" redirect-carefully
+BrowserMatch "^XML Spy" redirect-carefully
+BrowserMatch "^Dreamweaver-WebDAV-SCM1" redirect-carefully
+EOF
+
+cat - <<EOF > /etc/httpd/conf.d/dashboard.conf
+$path_passenger
+PassengerHighPerformance On
+PassengerMaxPoolSize 2
+PassengerMaxRequests 1000
+PassengerPoolIdleTime 600
+
+Listen *:443
+
+<VirtualHost *:443>
+
+    ServerName $fqdn
+    SetEnv HOME /usr/share/puppet-dashboard
+    ErrorLog /var/log/httpd/dashboard.error.log
+    TransferLog /var/log/httpd/dashboard.access.log
+    DocumentRoot /usr/share/puppet-dashboard/public
+
+    <Location /reports/upload>
+        <Limit POST>
+            Order allow,deny
+            Allow from all
+            Satisfy any
+        </Limit>
+    </Location>
+
+    <Location /nodes>
+        <Limit GET>
+            Order allow,deny
+            Allow from all
+            Satisfy any
+        </Limit>
+    </Location>
+
+    SSLEngine on
+    SSLCipherSuite ALL:!ADH:RC4+RSA:+HIGH:+MEDIUM:-LOW:-SSLv2:-EXP
+
+	# We have to use the non-puppet-dashboard certs here
+	# when uploading reports with ssl, the CN has to match the hostname,
+	# So we use the certs generated for he puppet master agent
+    SSLCertificateFile      /var/lib/puppet/ssl/certs/$fqdn.pem
+    SSLCertificateKeyFile   /var/lib/puppet/ssl/private_keys/$fqdn.pem
+    SSLCertificateChainFile /var/lib/puppet/ssl/ca/ca_crt.pem
+    SSLCACertificateFile    /var/lib/puppet/ssl/ca/ca_crt.pem
+    SSLCARevocationFile     /var/lib/puppet/ssl/ca/ca_crl.pem
+
+    SSLVerifyClient none
+    SSLVerifyDepth  1
+    SSLOptions +StdEnvVars
+
+</VirtualHost>
+EOF
+
+cat - <<EOF > /etc/httpd/conf.d/puppetmaster.conf
+$path_passenger
+PassengerHighPerformance On
+PassengerMaxPoolSize 2
+PassengerMaxRequests 1000
+PassengerPoolIdleTime 600
+
+Listen 8140
+<VirtualHost *:8140>
+
+    ServerName $fqdn
+    SSLEngine on
+    SSLCipherSuite ALL:!ADH:RC4+RSA:+HIGH:+MEDIUM:-LOW:-SSLv2:-EXP
+    SSLProtocol ALL -SSLv2
+    SSLCertificateFile      /var/lib/puppet/ssl/certs/$fqdn.pem
+    SSLCertificateKeyFile   /var/lib/puppet/ssl/private_keys/$fqdn.pem
+    SSLCertificateChainFile /var/lib/puppet/ssl/ca/ca_crt.pem
+    SSLCACertificateFile    /var/lib/puppet/ssl/ca/ca_crt.pem
+    SSLCARevocationFile     /var/lib/puppet/ssl/ca/ca_crl.pem
+
+    SSLVerifyClient optional
+    SSLVerifyDepth  1
+    SSLOptions +StdEnvVars
+
+    RequestHeader set X-SSL-Subject %{SSL_CLIENT_S_DN}e
+    RequestHeader set X-Client-DN %{SSL_CLIENT_S_DN}e
+    RequestHeader set X-Client-Verify %{SSL_CLIENT_VERIFY}e
+
+    PassengerEnabled On
+    DocumentRoot /var/lib/puppet/rack/puppetmaster/public/
+    ErrorLog /var/log/httpd/puppetmaster.error.log
+    TransferLog /var/log/httpd/puppetmaster.access.log
+	
+    <Directory /var/lib/puppet/rack/puppetmaster/public/>
+        Options None
+        AllowOverride None
+        Order allow,deny
+        allow from all
+    </Directory>
+	
+</VirtualHost>
+EOF
+
+
+/etc/init.d/puppetmaster start
+cd /usr/share/puppet-dashboard
+chown -R puppet-dashboard:puppet-dashboard log
+sudo -u puppet-dashboard rake cert:create_key_pair
+sudo -u puppet-dashboard rake cert:request
+puppet cert sign dashboard
+sudo -u puppet-dashboard rake cert:retrieve
+/etc/init.d/puppetmaster stop
+	
+mkdir -p /var/lib/puppet/rack/puppetmaster
+mkdir /var/lib/puppet/rack/puppetmaster/{public,tmp}
+cp /usr/share/puppet/ext/rack/files/config.ru /var/lib/puppet/rack/puppetmaster
+chown -R puppet /var/lib/puppet/rack/puppetmaster
+setfacl -m u:apache:rx /var/lib/puppet
+
+/etc/init.d/httpd restart
+cd /usr/share/puppet-dashboard
+sudo -u puppet-dashboard env RAILS_ENV=production script/delayed_job -p dashboard -n 1 -m start
+
+iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited
+iptables -A INPUT -p tcp -m tcp --dport 8140 -j ACCEPT
+iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT
+iptables -A INPUT -j REJECT --reject-with icmp-host-prohibited
