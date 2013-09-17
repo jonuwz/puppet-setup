@@ -74,6 +74,14 @@ cat <<EOF > /etc/puppet/puppet.conf
     environment = production
 EOF
 
+cat <<EOF > /etc/puppet/manifests/site.pp
+filebucket { 'main':
+  server => '$fqdn',
+  path   => false,
+}
+File { backup => 'main' }
+EOF
+
 cat <<'EOF' > /etc/puppet/auth.conf
 path ~ ^/catalog/([^/]+)$
 method find
@@ -483,6 +491,6 @@ cd /usr/share/puppet-dashboard
 sudo -u puppet-dashboard env RAILS_ENV=production script/delayed_job -p dashboard -n 1 -m start
 
 iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited
-iptables -A INPUT -p tcp -m tcp --dport 8140 -j ACCEPT
+iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 8140 -j ACCEPT
 iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT
 iptables -A INPUT -j REJECT --reject-with icmp-host-prohibited
