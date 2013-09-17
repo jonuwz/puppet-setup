@@ -1,6 +1,6 @@
 rpm -ivh https://yum.puppetlabs.com/el/6/products/x86_64/puppetlabs-release-6-7.noarch.rpm
-yum -y install gcc gcc-c++ curl-devel openssl-devel zlib-devel ruby-devel httpd-devel apr-devel apr-util-devel httpd mysql-server puppet-dashboard mod_ssl make puppet-server
-gem install passenger rack --no-ri --no-rdoc
+yum -y install gcc gcc-c++ curl-devel openssl-devel zlib-devel ruby-devel httpd-devel apr-devel apr-util-devel httpd mysql-server puppet-dashboard mod_ssl make puppet-server rubygem-activerecord sqlite-devel
+gem install passenger rack sqlite3 --no-ri --no-rdoc
 passenger-install-apache2-module -a
 
 chkconfig mysqld on
@@ -62,6 +62,9 @@ cat <<EOF > /etc/puppet/puppet.conf
     reporturl = https://$fqdn:443/reports/upload
     ssl_client_header = SSL_CLIENT_S_DN
     ssl_client_verify_header = SSL_CLIENT_VERIFY
+    storeconfigs = true
+    thin_storeconfigs = true
+    dblocation = /var/lib/puppet/db/storeconfigs.sqlite
 
 [agent]
     report = true
@@ -467,11 +470,12 @@ sudo -u puppet-dashboard rake cert:request
 puppet cert sign dashboard
 sudo -u puppet-dashboard rake cert:retrieve
 /etc/init.d/puppetmaster stop
-	
+
+mkdir -p /var/lib/puppet/db
 mkdir -p /var/lib/puppet/rack/puppetmaster
 mkdir /var/lib/puppet/rack/puppetmaster/{public,tmp}
 cp /usr/share/puppet/ext/rack/files/config.ru /var/lib/puppet/rack/puppetmaster
-chown -R puppet /var/lib/puppet/rack/puppetmaster
+chown -R puppet /var/lib/puppet/rack/puppetmaster /var/lib/puppet/db
 setfacl -m u:apache:rx /var/lib/puppet
 
 /etc/init.d/httpd restart
