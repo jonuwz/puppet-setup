@@ -14,12 +14,12 @@ grep max_allowed_packet /etc/my.cnf || sed -i '2 i \max_allowed_packet= 32M' /et
 mysql -u root -e "CREATE DATABASE dashboard_production CHARACTER SET utf8;"
 mysql -u root -e "CREATE DATABASE dashboard_test CHARACTER SET utf8;"
 mysql -u root -e "CREATE DATABASE dashboard_development CHARACTER SET utf8;"
-mysql -u root -e "CREATE USER dashboard@localhost IDENTIFIED BY dashboard;"
+mysql -u root -e "CREATE USER dashboard@localhost IDENTIFIED BY 'dashboard';"
 mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_production.* TO dashboard@localhost;"
 mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_test.* TO dashboard@localhost;"
 mysql -u root -e "GRANT ALL PRIVILEGES ON dashboard_development.* TO dashboard@localhost;"
 mysql -u root -e "CREATE DATABASE storeconfigs CHARACTER SET utf8;"
-mysql -u root -e "CREATE USER store@localhost IDENTIFIED BY storeconfigs;"
+mysql -u root -e "CREATE USER store@localhost IDENTIFIED BY 'storeconfigs';"
 mysql -u root -e "GRANT ALL PRIVILEGES ON storeconfigs.* TO store@localhost;"
 
 cat <<EOF > /usr/share/puppet-dashboard/config/database.yml
