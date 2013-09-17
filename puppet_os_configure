@@ -506,8 +506,8 @@ chown -R puppet /var/lib/puppet/rack/puppetmaster
 setfacl -m u:apache:rx /var/lib/puppet
 
 /etc/init.d/httpd restart
-cd /usr/share/puppet-dashboard
-sudo -u puppet-dashboard env RAILS_ENV=production script/delayed_job -p dashboard -n 1 -m start
+chkconfig puppet-dashboard-workers on
+/etc/init.d/puppet-dashboard-workers start
 
 iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited
 iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 8140 -j ACCEPT
